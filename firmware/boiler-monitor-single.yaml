@@ -1,0 +1,425 @@
+substitutions:
+  device_name: boiler-monitor
+  friendly_name: Boiler Monitor
+  firmware_version: "0.8.1"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  project:
+    name: username8733.esphome-boiler-monitor
+    version: ${firmware_version}
+
+  on_boot:
+    priority: -100
+    then:
+      # Enkel uppstartsindikering:
+      # grön LED på, röd LED kort, kort summerpip, grön LED på.
+      - output.turn_on: green_led_output
+      - delay: 250ms
+      - output.turn_on: red_led_output
+      - delay: 250ms
+      - output.turn_off: red_led_output
+      - if:
+          condition:
+            switch.is_on: buzzer_enabled
+          then:
+            - output.turn_on: buzzer_output
+            - delay: 120ms
+            - output.turn_off: buzzer_output
+      - output.turn_on: green_led_output
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+
+api:
+  reboot_timeout: 15min
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+########################################################
+# Outputs
+########################################################
+
+output:
+  - platform: gpio
+    pin: GPIO18
+    id: buzzer_output
+
+  - platform: gpio
+    pin: GPIO19
+    id: red_led_output
+
+  - platform: gpio
+    pin: GPIO21
+    id: green_led_output
+
+########################################################
+# Diagnostic text sensors
+########################################################
+
+text_sensor:
+  - platform: template
+    name: "${friendly_name} Firmware Version"
+    icon: mdi:tag
+    entity_category: diagnostic
+    lambda: |-
+      return std::string("${firmware_version}");
+
+  - platform: template
+    name: "${friendly_name} Last Alarm"
+    id: last_alarm_text
+    icon: mdi:clock-alert
+    update_interval: never
+
+  - platform: wifi_info
+    ip_address:
+      name: "${friendly_name} IP Address"
+      entity_category: diagnostic
+    ssid:
+      name: "${friendly_name} Connected SSID"
+      entity_category: diagnostic
+    mac_address:
+      name: "${friendly_name} MAC Address"
+      entity_category: diagnostic
+
+########################################################
+# Sensors
+########################################################
+
+sensor:
+  # Rå ljusnivå från fototransistor
+  - platform: adc
+    pin: GPIO34
+    id: boiler_led_level
+    name: "${friendly_name} LED Level"
+    attenuation: 11db
+    update_interval: 100ms
+    accuracy_decimals: 3
+    filters:
+      - exponential_moving_average:
+          alpha: 0.25
+          send_every: 1
+
+  # WiFi RSSI
+  - platform: wifi_signal
+    id: wifi_rssi
+    name: "${friendly_name} WiFi Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+
+  # WiFi kvalitet i procent
+  - platform: copy
+    source_id: wifi_rssi
+    name: "${friendly_name} WiFi Signal Percent"
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    filters:
+      - lambda: |-
+          if (x <= -100.0) return 0.0;
+          if (x >= -50.0) return 100.0;
+          return 2.0 * (x + 100.0);
+
+  # Uptime
+  - platform: uptime
+    name: "${friendly_name} Uptime"
+    update_interval: 60s
+    entity_category: diagnostic
+
+  # DS18B20 temperaturgivare
+  # Koppling:
+  # VDD  -> 3V3
+  # GND  -> GND
+  # DATA -> GPIO23
+  # 4.7k mellan DATA och 3V3
+  - platform: dallas_temp
+    name: "${friendly_name} Temperature"
+    id: boiler_temperature
+    update_interval: 30s
+    accuracy_decimals: 1
+
+########################################################
+# 1-Wire bus for DS18B20
+########################################################
+
+one_wire:
+  - platform: gpio
+    pin: GPIO23
+    id: one_wire_bus
+
+########################################################
+# Adjustable settings
+########################################################
+
+number:
+  - platform: template
+    id: boiler_led_threshold
+    name: "${friendly_name} LED Threshold"
+    optimistic: true
+    restore_value: true
+    initial_value: 1.20
+    min_value: 0.05
+    max_value: 3.10
+    step: 0.05
+    unit_of_measurement: "V"
+
+  - platform: template
+    id: alarm_clear_delay_seconds
+    name: "${friendly_name} Alarm Clear Delay"
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: 0
+    max_value: 600
+    step: 10
+    unit_of_measurement: "s"
+
+########################################################
+# Globals
+########################################################
+
+globals:
+  - id: alarm_latched
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: alarm_muted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: buzzer_phase
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: last_alarm_seen_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+########################################################
+# Switches
+########################################################
+
+switch:
+  - platform: template
+    id: buzzer_enabled
+    name: "${friendly_name} Buzzer Enabled"
+    icon: mdi:volume-high
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+########################################################
+# Binary sensors
+########################################################
+
+binary_sensor:
+  # Rå detektering av pannans LED via fototransistor
+  - platform: template
+    id: boiler_led_detected
+    name: "${friendly_name} Boiler LED Detected"
+    lambda: |-
+      return id(boiler_led_level).state > id(boiler_led_threshold).state;
+    on_press:
+      then:
+        # 300 ms verifiering för att undvika glitchar.
+        - delay: 300ms
+        - if:
+            condition:
+              binary_sensor.is_on: boiler_led_detected
+            then:
+              - lambda: |-
+                  id(alarm_latched) = true;
+                  id(alarm_muted) = false;
+                  id(last_alarm_seen_ms) = millis();
+
+                  auto now = id(ha_time).now();
+                  if (now.is_valid()) {
+                    id(last_alarm_text).publish_state(now.strftime("%Y-%m-%d %H:%M:%S"));
+                  } else {
+                    id(last_alarm_text).publish_state("Alarm detected - time not available");
+                  }
+
+  # Larmat läge. Ligger kvar tills återställning eller eventuell auto-clear.
+  - platform: template
+    id: alarm_latched_sensor
+    name: "${friendly_name} Alarm"
+    device_class: problem
+    lambda: |-
+      return id(alarm_latched);
+
+  - platform: template
+    id: buzzer_muted_sensor
+    name: "${friendly_name} Buzzer Muted"
+    lambda: |-
+      return id(alarm_muted);
+
+  - platform: template
+    id: buzzer_active_sensor
+    name: "${friendly_name} Buzzer Active"
+    lambda: |-
+      return id(alarm_latched) && !id(alarm_muted) && id(buzzer_enabled).state;
+
+  # Fysisk tyst-knapp
+  - platform: gpio
+    id: mute_button
+    name: "${friendly_name} Mute Button"
+    pin:
+      number: GPIO22
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    on_press:
+      then:
+        - lambda: |-
+            id(alarm_muted) = true;
+        - output.turn_off: buzzer_output
+
+########################################################
+# Intervals
+########################################################
+
+interval:
+  # Röd LED speglar pannans LED 1:1.
+  - interval: 100ms
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: boiler_led_detected
+          then:
+            - output.turn_on: red_led_output
+            - lambda: |-
+                id(last_alarm_seen_ms) = millis();
+          else:
+            - output.turn_off: red_led_output
+
+  # Summer: piper 0.5s på / 0.5s av tills kvitterad.
+  - interval: 500ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(alarm_latched) && !id(alarm_muted) && id(buzzer_enabled).state;
+          then:
+            - lambda: |-
+                id(buzzer_phase) = !id(buzzer_phase);
+            - if:
+                condition:
+                  lambda: |-
+                    return id(buzzer_phase);
+                then:
+                  - output.turn_on: buzzer_output
+                else:
+                  - output.turn_off: buzzer_output
+          else:
+            - output.turn_off: buzzer_output
+            - lambda: |-
+                id(buzzer_phase) = false;
+
+  # Grön LED hålls tänd som driftindikering.
+  - interval: 2s
+    then:
+      - output.turn_on: green_led_output
+
+  # Valfri automatisk återställning efter att pannlampan varit släckt.
+  # 0 sekunder = avstängt.
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const uint32_t delay_s = (uint32_t) id(alarm_clear_delay_seconds).state;
+              if (delay_s == 0) return false;
+              if (!id(alarm_latched)) return false;
+              if (id(boiler_led_detected).state) return false;
+              return (millis() - id(last_alarm_seen_ms)) > (delay_s * 1000UL);
+          then:
+            - lambda: |-
+                id(alarm_latched) = false;
+                id(alarm_muted) = false;
+            - output.turn_off: buzzer_output
+
+########################################################
+# Buttons
+########################################################
+
+button:
+  - platform: restart
+    name: "${friendly_name} Restart"
+    entity_category: diagnostic
+
+  - platform: template
+    name: "${friendly_name} Acknowledge Alarm"
+    icon: mdi:bell-cancel
+    on_press:
+      then:
+        - lambda: |-
+            id(alarm_muted) = true;
+        - output.turn_off: buzzer_output
+
+  - platform: template
+    name: "${friendly_name} Reset Latched Alarm"
+    icon: mdi:restore-alert
+    on_press:
+      then:
+        - lambda: |-
+            id(alarm_latched) = false;
+            id(alarm_muted) = false;
+        - output.turn_off: buzzer_output
+
+  - platform: template
+    name: "${friendly_name} Test Buzzer"
+    icon: mdi:volume-source
+    on_press:
+      then:
+        - if:
+            condition:
+              switch.is_on: buzzer_enabled
+            then:
+              - output.turn_on: buzzer_output
+              - delay: 1s
+              - output.turn_off: buzzer_output
+
+  - platform: template
+    name: "${friendly_name} Run Hardware Test"
+    icon: mdi:test-tube
+    on_press:
+      then:
+        - output.turn_off: green_led_output
+        - output.turn_on: red_led_output
+        - if:
+            condition:
+              switch.is_on: buzzer_enabled
+            then:
+              - output.turn_on: buzzer_output
+        - delay: 1s
+        - output.turn_off: buzzer_output
+        - delay: 2s
+        - output.turn_off: red_led_output
+        - output.turn_on: green_led_output
