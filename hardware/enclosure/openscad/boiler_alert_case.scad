@@ -1,11 +1,15 @@
 // Boiler Alert enclosure - printable concept
 $fn = 48;
-box_w = 100; box_h = 60; box_d = 30; wall = 2;
+box_w = 100;
+box_h = 60;
+box_d = 30;
+wall = 2;
 
 module base_box() {
   difference() {
     cube([box_w, box_h, box_d]);
-    translate([wall, wall, wall]) cube([box_w-2*wall, box_h-2*wall, box_d]);
+    translate([wall, wall, wall])
+      cube([box_w-2*wall, box_h-2*wall, box_d]);
   }
 }
 
